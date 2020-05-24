@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>Hello WebGL</title>
+    <script type="vertex-shader" id="terrainVertexShader">
+        attribute vec3 a_position; // the position of each vertex
+        attribute vec3 a_normal; // normal vector of each vertex
+
+        varying vec3 normal;    // normal to forward to fragment shader
+        varying vec3 worldPos;  // world position, used to calculate texture coordinates
+
+        uniform mat4 u_matrixM; // the model matrix of this object
+        uniform mat4 u_matrixV; // the view matrix of the camera
+        uniform mat4 u_matrixP; // the projection matrix of the camera
+
+        // inverse transpose to convert normals to world space
+        // ensures that normals are not stretched when object is scaled
+        uniform mat3 u_matrixIT; // inverse transpose of the model matrix
+
+        void main() {
+            normal = u_matrixIT * a_normal; // set transformed normal data for fragment shader
+            worldPos = (u_matrixM * vec4(a_position, 1)).xyz; // multiply model matrix and position vector
+
+            // calculate new position
+            vec4 pos = u_matrixP * u_matrixV * u_matrixM * vec4(a_position, 1);
+            gl_Position = pos;
+        }
+    </script>
+    <script type="fragment-shader" id="terrainFragmentShader">
+        precision highp float; //float precision settings
+
+        varying vec3 normal; // normal data from the vertex shader
+        varying vec3 worldPos; // world position from the vertex shader
+
+        uniform vec4 u_tint;            // the tint color of this object
+        uniform vec3 u_lightDirection;  // directional light in world space
+        uniform vec3 u_lightColor;      // light color
+        uniform vec3 u_ambientColor;    // intensity of ambient light
+
+        uniform sampler2D u_biomeMap;
+
+        // samplers for biome 1
+        uniform sampler2D u_topTex1;     // default texture to use for mapping on the y-axis
+        uniform sampler2D u_sidesTex1;   // texture to use for mapping on the x-axis and z-axis
+        uniform sampler2D u_snowTex;    // texture to use for mapping snow on the y-axis
+
+        // samplers for biome 2
+        uniform sampler2D u_topTex2;     // default texture to use for mapping on the y-axis
+        uniform sampler2D u_sidesTex2;   // texture to use for mapping on the x-axis and z-axis
+
+        vec4 triplanarColor() {
+
+            // Adjusted biome map uv coordinates
+            vec2 uv_b = (worldPos.xz - 10.0) / 20.0;
+
+            // Biome blending value, multiplied by 1.5 for higher contrast
+            float bb = texture2D(u_biomeMap, uv_b).x * 1.5;
+
+            // Biome 1 (with snow-covered mountain tops)
+
+            float hs = 0.5; // starting height for snow
+            float ht = 2.0; // height blending speed
+
+            vec3 c_yd = texture2D(u_topTex1, worldPos.xz).rgb; // default top texture
+            vec3 c_ys = texture2D(u_snowTex, worldPos.xz).rgb; // snow texture
+
+            // height blend factor
+            float bh = max(0.0, min((worldPos.y - hs)*ht, 1.0));
+
+            // linear blending to get color value for top texture
+            vec3 colorY1 = c_ys * bh + c_yd * (1.0 - bh);
+           
+            // get color values for x, z axes
+            vec3 colorX1 = texture2D(u_sidesTex1, worldPos.zy).rgb;
+            vec3 colorZ1 = texture2D(u_sidesTex1, worldPos.xy).rgb;
+
+            // Biome 2
+
+            vec3 colorY2 = texture2D(u_topTex2, worldPos.xz).rgb;
+            vec3 colorX2 = texture2D(u_sidesTex2, worldPos.zy).rgb;
+            vec3 colorZ2 = texture2D(u_sidesTex2, worldPos.xy).rgb;
+
+            // linear blending to get final color values
+            vec3 colorX = colorX2 * bb + colorX1 * (1.0 - bb);
+            vec3 colorY = colorY2 * bb + colorY1 * (1.0 - bb);
+            vec3 colorZ = colorZ2 * bb + colorZ1 * (1.0 - bb);
+
+            // adjust blend weights using plateau size and transition speed
+            float plateauSize = 0.3; // adjusts angle at which top texture starts
+            float transitionSpeed = 10.0; // controls blending around edges were top and side meet
+
+            vec3 blendWeights = abs(normal); // take abs value (direction doesn't matter, only magnitude)
+            blendWeights.y -= plateauSize;
+            blendWeights = pow(max(blendWeights,0.0), vec3(transitionSpeed));
+
+            // ensure blend weights sum to 1
+            float n = blendWeights.x + blendWeights.y + blendWeights.z;
+            blendWeights /= n;
+
+            return vec4(colorX * blendWeights.x + colorY * blendWeights.y + colorZ * blendWeights.z, 1.0);
+        }
+        void main()
+        {
+            // vec3 nNormal = normalize(normal); // ensure that normals are of length 1
+    
+            // diffuse calculations (using lambert's law)
+            float diffuseIntensity = max(0.0, dot(normal, -u_lightDirection));
+            vec3 diffuseColor = diffuseIntensity * u_lightColor;
+
+            // combine and add tint color
+            vec3 ambientDiffuse = u_ambientColor + diffuseColor;
+            ambientDiffuse = clamp(ambientDiffuse, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0));
+
+            // color lookup
+            vec4 textureColor = triplanarColor();  
+
+            // scale UV to change repetition of texture
+            // float textureScale = 2.0;
+            // vec4 textureColor = texture2D(u_mainTex, worldPos.xz * textureScale);
+
+            // multiplicative blending with tint
+            vec4 combinedColor = textureColor * u_tint;
+            
+            // multiplicative color blending with lighting
+            vec3 finalColor = ambientDiffuse * combinedColor.xyz;
+            gl_FragColor = vec4(finalColor, combinedColor.a);
+        }
+    </script>
+
+    <script type="vertex-shader" id="gridVertexShader">
+        // a shader that uses vertex colors to render our axis grid
+        attribute vec3 a_position; // the position of each vertex
+        attribute vec3 a_vertexcolor; // the color of each vertex
+
+        uniform mat4 u_matrixM; // the model matrix of this object
+        uniform mat4 u_matrixV; // the view matrix of the camera
+        uniform mat4 u_matrixP; // the perspective matrix of the camera
+
+        varying vec3 vertexcolor; // varying to bring vertexcolor to the fragment shader
+        void main() {
+            gl_Position = u_matrixP * u_matrixV * u_matrixM * vec4 (a_position, 1);
+            vertexcolor = a_vertexcolor;
+        }
+    </script>
+    <script type="fragment-shader" id="gridFragmentShader">
+        // a shader that uses vertex colors to render our axis grid
+        precision highp float; //float precision settings
+        varying vec3 vertexcolor; // vertexcolor from vertex shader
+
+        void main()
+        {
+            gl_FragColor = vec4(vertexcolor, 1);
+        }
+    </script>
+</head>
+<body>
+	<canvas width="500" height="500" id="webgl-canvas"></canvas>
+
+    <script src="webgl-debug.js"></script>
+    <script src="math.js"></script>
+    <script src="gl-utils.js"></script>
+    <script src="transform.js"></script>
+    <script src="shader.js"></script>
+    <script src="renderloop.js"></script>
+    <script src="model.js"></script>
+    <script src="primitives.js"></script>
+    <script src="input.js"></script>
+    <script src="objparser.js"></script>
+    <script src="camera.js"></script>
+
+    <script type="text/javascript">
+        "use strict"; // use strict javascript compiling
+
+        //--------------------------------------------------
+        // Global Cashes
+        //--------------------------------------------------
+        var MeshCache = {}; // here all mesh objects are stored, see GLUtils.createMeshVAO() for details on how a mesh is added.
+        var TextureCache = {};  // stores all texture objects, see GLUtils.loadTextures() for details
+
+        // -----------------------------------------
+        // Global variables
+        // -----------------------------------------
+        var gl;
+        var canvas;
+        var renderLoop;
+
+        var g_terrainShader;
+        var g_camera;
+        var g_cameraController;
+
+        var g_terrain;
+
+        // lighting
+        var g_lightingData = {
+            lightDirection: new Vector3(-1.0, -1.0, -0.5).normalize(),
+            lightColor: new Vector3(0.95, 0.9, 0.8), // light yellow
+            ambientColor: new Vector3(0.1, 0.1, 0.1) // dark gray
+        }
+
+        function setup(){
+            canvas = document.getElementById("webgl-canvas");
+            gl = GLUtils.createWebGL2Instance(canvas, true);
+            gl.clearColor(0.85, 0.95, 0.9, 1); // set clear color (RGBA)
+            gl.fitScreen();
+            gl.enable(gl.DEPTH_TEST);
+            gl.depthFunc(gl.LEQUAL);
+            Input.initialize(canvas);
+        }
+
+        function init(){
+            g_terrainShader = new Shader(gl, GLUtils.getDomShaderSrc("terrainVertexShader"),
+                                      GLUtils.getDomShaderSrc("terrainFragmentShader"));
+            g_terrainShader.useLighting = true;
+            g_camera = new PerspectiveCamera(gl, 45, 0.1, 1000, canvas.width / canvas.height);
+            g_cameraController = new OrbiterCameraController(canvas, g_camera);
+
+            // load textures for biome 1
+            GLUtils.loadTexture(gl, "grass", "resources/grass02.png");
+            GLUtils.loadTexture(gl, "rock", "resources/rock01.png");
+            GLUtils.loadTexture(gl, "snow", "resources/snow.png");
+            // load textures for biome 2
+            GLUtils.loadTexture(gl, "sand", "resources/sand.png");
+            GLUtils.loadTexture(gl, "stone", "resources/sandstone.png");
+            // load biome map "texture"
+            GLUtils.loadTexture(gl, "biomemap", "resources/biomes.png");
+
+            let terrainMat = {tint: [1,1,1,1]};
+            g_terrain = new Model(new Transform(), OBJLoader.getMesh(gl, "terrain", "resources/terrain3.obj"), terrainMat);
+
+            renderLoop = new RenderLoop(draw).start();
+        }
+
+        function draw(deltaTime){
+            Input.update();
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+            g_cameraController.update();
+
+            g_terrain.update();
+            g_terrain.render(gl, g_terrainShader, g_camera, g_lightingData);
+        }
+
+        window.addEventListener("load",function(){
+            setup();
+            init();
+        });
+
+    </script>
+</body>
+</html>
